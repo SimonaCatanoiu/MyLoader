@@ -50,9 +50,19 @@ int get_page_index(uintptr_t segment_base_address, uintptr_t address, int page_s
 	return segment_offset / page_size;
 }
 
+void mmap_page(so_seg_t* target_segment,int page_no,int page_size,int mapp_size,int flags)
+{
+	void* mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, mapp_size, target_segment->perm,
+		flags, exec_fd, target_segment->offset + page_no * page_size);
+	if (mmap_result == MAP_FAILED)
+	{
+		printf("Eroare la mapare pagina\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
 static void segv_handler(int signum, siginfo_t *info, void *context)
 {
-	void *mmap_result;
 	// obtine adresa care a generat page fault-ul
 	uintptr_t address = (uintptr_t)info->si_addr;
 
@@ -87,26 +97,14 @@ static void segv_handler(int signum, siginfo_t *info, void *context)
 		if (target_segment->file_size >= (page_no + 1) * page_size)
 		{
 			// Mapam o pagina intreaga
-			mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, page_size, target_segment->perm,
-				 MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
-			if (mmap_result == MAP_FAILED)
-			{
-				printf("Eroare la mapare pagina\n");
-				exit(EXIT_FAILURE);
-			}
+			mmap_page(target_segment,page_no,page_size,page_size,MAP_PRIVATE|MAP_FIXED);
 		}
 		else
 		{
 			// Subcazul2: Mapam ultima pagina
 			int last_bytes = target_segment->file_size - page_size * page_no;
 			// Daca last_bytes nu e multiplu de pagina => ce ramane va fi automat completat cu zero (asa zice in mmap(2)).
-			mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, last_bytes, target_segment->perm,
-							   MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
-			if (mmap_result == MAP_FAILED)
-			{
-				printf("Eroare la mapare pagina\n");
-				exit(EXIT_FAILURE);
-			}
+			mmap_page(target_segment,page_no,page_size,last_bytes,MAP_PRIVATE|MAP_FIXED);
 		}
 	}
 	// Cazul2: dimensiunea segmentului din memorie > dimensiunea segmentului din fisier
@@ -116,13 +114,7 @@ static void segv_handler(int signum, siginfo_t *info, void *context)
 		if (target_segment->file_size >= (page_no + 1) * page_size)
 		{
 			// Mapam o pagina intreaga
-			mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, page_size, target_segment->perm,
-							   MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
-			if (mmap_result == MAP_FAILED)
-			{
-				printf("Eroare la mapare pagina\n");
-				exit(EXIT_FAILURE);
-			}
+			mmap_page(target_segment,page_no,page_size,page_size,MAP_PRIVATE|MAP_FIXED);
 		}
 		else
 		{
@@ -130,28 +122,16 @@ static void segv_handler(int signum, siginfo_t *info, void *context)
 			if ((target_segment->file_size < (page_no + 1) * page_size) && (target_segment->file_size > page_no * page_size))
 			{
 				int last_bytes = target_segment->file_size - page_size * page_no;
-				mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, last_bytes, target_segment->perm,
-								   MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
-				if (mmap_result == MAP_FAILED)
-				{
-					printf("Eroare la mapare pagina\n");
-					exit(EXIT_FAILURE);
-				}
+				mmap_page(target_segment,page_no,page_size,last_bytes,MAP_PRIVATE|MAP_FIXED);
 
 				// Restul de bytes pana la final ii umplem cu 0
 				memset((void *)target_segment->vaddr + target_segment->file_size, 0, (page_no + 1) * page_size - target_segment->file_size);
 			}
 			else
 			{
-				// Subcazul3: avem o pagina ce a trecut de file_size si trebuie zeroizat pana la mem_size
+				// Subcazul3: avem o pagina ce a trecut de file_size si trebuie zeroizata pana la mem_size
 				// Mapam toata pagina cu 0
-				mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, page_size, target_segment->perm,
-								   MAP_PRIVATE | MAP_FIXED | MAP_ANON, 0, 0);
-				if (mmap_result == MAP_FAILED)
-				{
-					printf("Eroare la mapare pagina\n");
-					exit(EXIT_FAILURE);
-				}
+				mmap_page(target_segment,page_no,page_size,page_size,MAP_PRIVATE | MAP_FIXED | MAP_ANON);
 			}
 		}
 	}
