@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "exec_parser.h": "c",
+        "libc-header-start.h": "c",
+        "string.h": "c",
+        "signal.h": "c",
+        "unistd.h": "c"
+    }
+}
