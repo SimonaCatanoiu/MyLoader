@@ -4,6 +4,7 @@
         "libc-header-start.h": "c",
         "string.h": "c",
         "signal.h": "c",
-        "unistd.h": "c"
+        "unistd.h": "c",
+        "functional": "c"
     }
 }

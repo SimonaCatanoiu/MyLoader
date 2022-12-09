@@ -3,18 +3,22 @@
 #include <stdlib.h>
 #include <sys/signal.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 
 #include "exec_parser.h"
 
-int ceiling(int x, int y){
-    if(!x%y)               
-        return x/y;        
-    else                   
-        return (x/y) + 1;  
+int ceiling(int x, int y)
+{
+	if (!x % y)
+		return x / y;
+	else
+		return (x / y) + 1;
 }
 
 static so_exec_t *exec;
 static struct sigaction default_handler;
+static int exec_fd;
 
 int get_segment_number_for_address(uintptr_t address)
 {
@@ -48,6 +52,7 @@ int get_page_index(uintptr_t segment_base_address, uintptr_t address, int page_s
 
 static void segv_handler(int signum, siginfo_t *info, void *context)
 {
+	void *mmap_result;
 	// obtine adresa care a generat page fault-ul
 	uintptr_t address = (uintptr_t)info->si_addr;
 
@@ -65,16 +70,92 @@ static void segv_handler(int signum, siginfo_t *info, void *context)
 	int page_size = getpagesize();
 	int page_no = get_page_index(target_segment->vaddr, address, page_size);
 	// Verificam daca pagina a fost deja mapata
-	int* page_mapping_vect=(int*)target_segment->data;
-	if(page_mapping_vect[page_no]!=0)
+	int *page_mapping_vect = (int *)target_segment->data;
+	if (page_mapping_vect[page_no] != 0)
 	{
-		//Pagina e deja mapata => acces nepermis la memorie => se ruleaza handler-ul implicit
+		// Pagina e deja mapata => acces nepermis la memorie => se ruleaza handler-ul implicit
 		default_handler.sa_sigaction(signum, info, context);
 	}
+	// Pagina se gaseste intr-un segment si nu a fost mapata.
+	// Mapam pagina corespunzatoare din executabil
+	// Avem mai multe cazuri posibile
 
-	//Pagina se gaseste intr-un segment si nu a fost mapata.
-	//Mapam pagina. Cazuri posibile:
-	//1. 
+	// Cazul 1: dimensiunea segmentului in memorie = dimensiunea segmentului din fisier
+	if (target_segment->file_size == target_segment->mem_size)
+	{
+		// Subcazul1: avem o pagina intreaga de mapat
+		if (target_segment->file_size >= (page_no + 1) * page_size)
+		{
+			// Mapam o pagina intreaga
+			mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, page_size, target_segment->perm,
+				 MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
+			if (mmap_result == MAP_FAILED)
+			{
+				printf("Eroare la mapare pagina\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+		else
+		{
+			// Subcazul2: Mapam ultima pagina
+			int last_bytes = target_segment->file_size - page_size * page_no;
+			// Daca last_bytes nu e multiplu de pagina => ce ramane va fi automat completat cu zero (asa zice in mmap(2)).
+			mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, last_bytes, target_segment->perm,
+							   MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
+			if (mmap_result == MAP_FAILED)
+			{
+				printf("Eroare la mapare pagina\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+	}
+	// Cazul2: dimensiunea segmentului din memorie > dimensiunea segmentului din fisier
+	if (target_segment->file_size < target_segment->mem_size)
+	{
+		// Subcazul1: avem o pagina intreaga de mapat
+		if (target_segment->file_size >= (page_no + 1) * page_size)
+		{
+			// Mapam o pagina intreaga
+			mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, page_size, target_segment->perm,
+							   MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
+			if (mmap_result == MAP_FAILED)
+			{
+				printf("Eroare la mapare pagina\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+		else
+		{
+			// Subcazul2: avem o pagina partiala de mapat(ultima pagina din executabil)
+			if ((target_segment->file_size < (page_no + 1) * page_size) && (target_segment->file_size > page_no * page_size))
+			{
+				int last_bytes = target_segment->file_size - page_size * page_no;
+				mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, last_bytes, target_segment->perm,
+								   MAP_PRIVATE | MAP_FIXED, exec_fd, target_segment->offset + page_no * page_size);
+				if (mmap_result == MAP_FAILED)
+				{
+					printf("Eroare la mapare pagina\n");
+					exit(EXIT_FAILURE);
+				}
+
+				// Restul de bytes pana la final ii umplem cu 0
+				memset((void *)target_segment->vaddr + target_segment->file_size, 0, (page_no + 1) * page_size - target_segment->file_size);
+			}
+			else
+			{
+				// Subcazul3: avem o pagina ce a trecut de file_size si trebuie zeroizat pana la mem_size
+				// Mapam toata pagina cu 0
+				mmap_result = mmap((void *)target_segment->vaddr + page_no * page_size, page_size, target_segment->perm,
+								   MAP_PRIVATE | MAP_FIXED | MAP_ANON, 0, 0);
+				if (mmap_result == MAP_FAILED)
+				{
+					printf("Eroare la mapare pagina\n");
+					exit(EXIT_FAILURE);
+				}
+			}
+		}
+	}
+	page_mapping_vect[page_no] = 1;
 }
 
 int so_init_loader(void)
@@ -83,6 +164,14 @@ int so_init_loader(void)
 	struct sigaction sa;
 
 	memset(&sa, 0, sizeof(sa));
+
+	rc = sigemptyset(&sa.sa_mask);
+	if (rc < 0)
+		return -1;
+	rc = sigaddset(&sa.sa_mask, SIGSEGV);
+	if (rc < 0)
+		return -1;
+	
 	sa.sa_sigaction = segv_handler;
 	sa.sa_flags = SA_SIGINFO;
 	rc = sigaction(SIGSEGV, &sa, &default_handler);
@@ -103,16 +192,16 @@ void init_so_exec_data(so_exec_t *exec)
 	int page_size = getpagesize();
 	for (int i = 0; i < exec->segments_no; i++)
 	{
-		int int_pages_number = ceiling(exec->segments[i].mem_size,page_size);
+		int int_pages_number = ceiling(exec->segments[i].mem_size, page_size);
 
 		// aloca vector in structura data a lui exec
-		int *pages_mapping = calloc(0, sizeof(int_pages_number * sizeof(int)));
+		int *pages_mapping = calloc(int_pages_number, sizeof(int));
 		if (pages_mapping == NULL)
 		{
 			printf("Eroare la alocare data pt pagini\n");
 			exit(EXIT_FAILURE);
 		}
-		exec->segments[i].data = (int *)pages_mapping;
+		exec->segments[i].data = (void *)pages_mapping;
 	}
 }
 
@@ -122,9 +211,19 @@ int so_execute(char *path, char *argv[])
 	if (!exec)
 		return -1;
 
+	// Deschidem file descriptorul pentru fisierul executabil
+	exec_fd = open(path, O_RDONLY);
+	if (exec_fd < 0)
+		return -1;
+
 	init_so_exec_data(exec);
 
 	so_start_exec(exec, argv);
+
+	for (int i = 0; i < exec->segments_no; i++)
+		free(exec->segments[i].data);
+
+	close(exec_fd);
 
 	return -1;
 }
